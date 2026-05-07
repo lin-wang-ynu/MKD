@@ -1,2 +1,0 @@
-# MKD
-Multilingual Knowledge Editing
