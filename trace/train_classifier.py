@@ -11,9 +11,7 @@ import copy
 from collections import defaultdict
 
 
-# ========================================
-# 语言组合编码（保留，用于数据生成标签）
-# ========================================
+
 def encode_language_combination(edit_lang, test_lang):
     lang_mapping = {
         ("en", "en"): 0,  # 英英
@@ -24,11 +22,7 @@ def encode_language_combination(edit_lang, test_lang):
     return lang_mapping.get((edit_lang, test_lang), 0)
 
 
-# ========================================
-# 纯 XLM 相似度模型（不再使用额外的语言 / portability 嵌入）
-# 与 SERAC 推理端结构严格对齐：底层 AutoModel + AutoTokenizer，
-# 相似度使用归一化余弦相似度 [0, 1]。
-# ========================================
+
 class PureXLMSimilarityClassifier(nn.Module):
     def __init__(self, model_name: str = "model/xlm-roberta-base"):
         super().__init__()
@@ -36,7 +30,7 @@ class PureXLMSimilarityClassifier(nn.Module):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     def _encode(self, questions):
-        """将一批问题编码为句向量表示，使用 Mean Pooling 方法。"""
+
         inputs = self.tokenizer(
             questions,
             return_tensors="pt",
@@ -47,39 +41,32 @@ class PureXLMSimilarityClassifier(nn.Module):
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         outputs = self.model(**inputs)
 
-        # 使用 Mean Pooling（考虑 attention mask）
-        # 这是 XLM-RoBERTa 和相似度任务的最佳实践
+
         token_embeddings = outputs.last_hidden_state  # [batch_size, seq_len, hidden_size]
         attention_mask = inputs['attention_mask']  # [batch_size, seq_len]
         
-        # 扩展 attention mask 的维度以匹配 token_embeddings
+
         input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
         
-        # 对所有 token 的 embeddings 求和（忽略 padding）
+
         sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, 1)
         
-        # 计算实际 token 数量（避免除零）
+
         sum_mask = torch.clamp(input_mask_expanded.sum(1), min=1e-9)
         
-        # 计算平均值
+
         embeddings = sum_embeddings / sum_mask
 
         return embeddings
 
     def forward(self, edit_questions, test_questions):
-        """
-        返回两组问题的向量表示：
-        - edit_questions: 作为“编辑问题 / 记忆问题”
-        - test_questions: 作为“测试问题”
-        """
+
         edit_embeddings = self._encode(edit_questions)
         test_embeddings = self._encode(test_questions)
         return edit_embeddings, test_embeddings
 
 
-# ========================================
-# 训练数据集（保持原样）
-# ========================================
+
 class SimilarityDataset(Dataset):
     def __init__(self, data):
         self.data = data
@@ -91,9 +78,7 @@ class SimilarityDataset(Dataset):
         return self.data[idx]
 
 
-# ========================================
-# 自定义 collate 函数（portability_flag 统一补 0，虽然后续不再使用）
-# ========================================
+
 def collate_fn(batch):
     for item in batch:
         if "portability_flag" not in item:
@@ -101,9 +86,7 @@ def collate_fn(batch):
     return batch
 
 
-# ========================================
-# 数据生成器（保持原有规则，用标签控制 original / generalization / portability / local 等）
-# ========================================
+
 class MultilingualDataGenerator:
     def __init__(self):
         self.similarity_rules = {
@@ -115,21 +98,21 @@ class MultilingualDataGenerator:
             "local_anchor": 1.0,
         }
 
-        # 两个锚点比例
+
         self.anchor_ratios = {
-            "edit_anchor": 0.6,  # 锚点1：编辑问题
-            "local_anchor": 0.4,  # 锚点2：局部性问题
+            "edit_anchor": 0.6,
+            "local_anchor": 0.4,
         }
 
-        # edit_anchor 内部正样本比例
+
         self.edit_positive_ratios = {
             "original": 0.4,
             "generalization": 0.4,
             "portability": 0.2,
         }
 
-        # 跨语言样本比例提升
-        self.cross_lang_ratio = 0.6  # 60% 样本为跨语言
+
+        self.cross_lang_ratio = 0.6
 
     def generate_training_data(self, en_data, zh_data, max_samples_per_type=10000):
         training_data = []
@@ -167,7 +150,7 @@ class MultilingualDataGenerator:
 
         counts = {"original": 0, "generalization": 0, "portability": 0, "local_anchor": 0}
 
-        # unrelated 采样池
+
         subject_to_samples = defaultdict(list)
         for idx, sample in enumerate(test_data):
             subject_to_samples[sample["subject"]].append((idx, sample))
@@ -192,14 +175,14 @@ class MultilingualDataGenerator:
             src = test_sample["src"].replace("nq question: ", "").strip()
             rephrase = test_sample["rephrase"].replace("nq question: ", "").strip()
             loc = test_sample["loc"].replace("nq question: ", "").strip()
-            # 由于训练集中没有 portability 显式字段，使用 rephrase 作为默认 portability 问题
+
             port_q = (
                 test_sample.get("portability", {}).get("New Question", rephrase).replace("nq question: ", "").strip()
             )
 
             lang_code = encode_language_combination(edit_lang, test_lang)
 
-            # 锚点1：edit_anchor
+
             if counts["original"] < original_count:
                 sample = self._make_edit_anchor_sample(
                     edit_q,
@@ -254,7 +237,7 @@ class MultilingualDataGenerator:
                 combo_data.append(sample)
                 counts["portability"] += 1
 
-            # 锚点2：local_anchor
+
             if counts["local_anchor"] < local_anchor_count:
                 sample = self._make_local_anchor_sample(loc, test_lang, src, rephrase, port_q)
                 combo_data.append(sample)
@@ -284,10 +267,10 @@ class MultilingualDataGenerator:
         anchor = {"question": edit_q, "answer": edit_ans, "subject": edit_subj, "lang": edit_lang}
         positive = {"question": pos_q, "lang": test_lang}
 
-        # 负样本1：local
+
         neg_local = {"question": loc, "lang": test_lang, "neg_type": "local"}
 
-        # 负样本2：unrelated
+
         other_subjs = [s for s in all_subjects if s != edit_subj]
         if other_subjs:
             other_subj = random.choice(other_subjs)
@@ -325,9 +308,7 @@ class MultilingualDataGenerator:
         }
 
 
-# ========================================
-# 分类器训练器（仅使用纯 XLM + 余弦相似度）
-# ========================================
+
 class MemorylessClassifierTrainer:
     def __init__(self, classifier: PureXLMSimilarityClassifier, optimizer):
         self.classifier = classifier
@@ -335,9 +316,7 @@ class MemorylessClassifierTrainer:
         self.mse_loss = nn.MSELoss()
 
     def margin_mse(self, pred, target, margin=0.05, power=2):
-        """
-        仅当 |pred - target| > margin 时产生损失；且偏差越大惩罚越高。
-        """
+
         diff = torch.abs(pred - target)
         excess = torch.relu(diff - margin)
         return (excess ** power).mean()
@@ -354,7 +333,7 @@ class MemorylessClassifierTrainer:
         regression_weight=0.8,
     ):
         self.classifier.to(device)
-        best_ratio = 0.0  # 改为跟踪 below_05_ratio，越大越好
+        best_ratio = 0.0
         patience_counter = 0
         best_model_weights = None
         similarity_distributions = None
@@ -377,12 +356,12 @@ class MemorylessClassifierTrainer:
                     anchor_embeds, positive_embeds, negative_questions_list, anchor_questions, device, temperature
                 )
 
-                # 与推理保持一致：归一化余弦相似度到 [0, 1]
+
                 pos_sim_raw = torch.nn.functional.cosine_similarity(anchor_embeds, positive_embeds, dim=-1)
                 pos_sim = torch.clamp((pos_sim_raw + 1) / 2, 0.0, 1.0)
                 regression_loss = self.margin_mse(pos_sim, sim_labels, margin=0.05, power=1)
 
-                # 负样本相似度约束（local 更强约束）
+
                 neg_regression_loss = 0.0
                 num_negs = 0
                 local_weight = 3.0
@@ -392,14 +371,14 @@ class MemorylessClassifierTrainer:
                     if negs:
                         neg_q = [n["question"] for n in negs]
                         neg_types = [n.get("neg_type", "") for n in negs]
-                        # 使用相同的 anchor 文本，分别与多个负样本计算向量
+
                         _, neg_embeds = self.classifier([anchor_questions[i]] * len(neg_q), neg_q)
                         neg_sim_raw = torch.nn.functional.cosine_similarity(
                             anchor_embeds[i : i + 1].repeat(len(neg_q), 1), neg_embeds, dim=-1
                         )
                         neg_sim = torch.clamp((neg_sim_raw + 1) / 2, 0.0, 1.0)
 
-                        # 加权 MSE（local 更重）
+
                         weights = torch.tensor(
                             [local_weight if t == "local" else 1.0 for t in neg_types],
                             device=device,
@@ -409,7 +388,7 @@ class MemorylessClassifierTrainer:
                         errors = excess
                         weighted_mse = (weights * errors).sum() / (weights.sum() + 1e-8)
 
-                        # hinge：local / unrelated 分别使用更严格的上界
+
                         margins = torch.tensor(
                             [local_margin if t == "local" else 0.4 for t in neg_types],
                             device=device,
@@ -449,7 +428,7 @@ class MemorylessClassifierTrainer:
                     f"Avg Gen Score: {np.mean(gen_scores):.4f} | Below 0.5 Ratio: {below_05_ratio:.3f}"
                 )
 
-                # 使用 below_05_ratio 作为早停指标，越大越好
+
                 if below_05_ratio > best_ratio + min_delta:
                     best_ratio = below_05_ratio
                     patience_counter = 0
@@ -540,7 +519,7 @@ class MemorylessClassifierTrainer:
 
                 positive_similarities.extend(pos_sim.cpu().numpy().tolist())
 
-                # 负样本相似度（取每个 anchor 的最大值）
+
                 max_neg_sim = torch.full_like(pos_sim, float("-inf"))
                 for i, negs in enumerate(negative_questions_list):
                     if negs:
@@ -553,7 +532,7 @@ class MemorylessClassifierTrainer:
                         max_neg_sim[i] = neg_sim.max()
                 negative_similarities.extend(max_neg_sim.cpu().numpy().tolist())
 
-                # generalization 分数（只统计 generalization_positive）
+
                 for idx, item in enumerate(batch):
                     if item["sample_type"] == "generalization_positive":
                         generalization_scores.append(pos_sim[idx].item())
@@ -564,7 +543,7 @@ class MemorylessClassifierTrainer:
                 )
                 total_predictions += len(anchor_embeds)
 
-        # 统计无关样本相似度 < 0.5 的比例，帮助标定
+
         neg_sims_np = np.array(negative_similarities)
         below_05_ratio = float((neg_sims_np < 0.5).mean()) if neg_sims_np.size > 0 else 0.0
         print(f"[Eval] Unrelated pairs with sim < 0.5: {below_05_ratio:.3f}")
@@ -575,7 +554,7 @@ class MemorylessClassifierTrainer:
             positive_similarities,
             negative_similarities,
             generalization_scores,
-            below_05_ratio,  # 新增：返回负样本相似度 < 0.5 的比例
+            below_05_ratio,
         )
 
     def info_nce_loss(
@@ -591,7 +570,7 @@ class MemorylessClassifierTrainer:
         pos_sim = torch.nn.functional.cosine_similarity(anchor_embeds, positive_embeds, dim=-1) / temperature
         logits_list = [pos_sim.unsqueeze(-1)]
 
-        # 显式负样本
+
         max_negatives = max(len(neg_list) for neg_list in negative_questions_list) if negative_questions_list else 0
         if max_negatives > 0:
             all_neg_questions = []
@@ -612,7 +591,7 @@ class MemorylessClassifierTrainer:
                 neg_inputs = {k: v.to(device) for k, v in neg_inputs.items()}
                 neg_outputs = self.classifier.model(**neg_inputs)
                 
-                # 使用 Mean Pooling（与 _encode 方法保持一致）
+
                 neg_token_embeddings = neg_outputs.last_hidden_state
                 neg_attention_mask = neg_inputs['attention_mask']
                 neg_input_mask_expanded = neg_attention_mask.unsqueeze(-1).expand(neg_token_embeddings.size()).float()
@@ -626,7 +605,7 @@ class MemorylessClassifierTrainer:
                     neg_sim = torch.nn.functional.cosine_similarity(anchor_embeds, neg_embeds, dim=-1) / temperature
                     logits_list.append(neg_sim.unsqueeze(-1))
 
-        # batch 内 hard negatives
+
         if batch_size > 1:
             expanded_anchor = anchor_embeds.unsqueeze(1).expand(-1, batch_size, -1)
             expanded_pos = positive_embeds.unsqueeze(0).expand(batch_size, -1, -1)
@@ -642,7 +621,7 @@ class MemorylessClassifierTrainer:
     def count_correct_predictions_contrastive(
         self, anchor_embeds, positive_embeds, negative_questions_list, anchor_questions, device
     ):
-        # 与训练时保持一致：归一化相似度
+
         pos_sim_raw = torch.nn.functional.cosine_similarity(anchor_embeds, positive_embeds, dim=-1)
         pos_sim = torch.clamp((pos_sim_raw + 1) / 2, 0.0, 1.0)
         max_neg_sim = torch.full_like(pos_sim, float("-inf"))
@@ -658,10 +637,7 @@ class MemorylessClassifierTrainer:
         return (pos_sim > max_neg_sim).sum().item()
 
     def save_model(self, model: PureXLMSimilarityClassifier, save_path: str):
-        """
-        保存格式与 SERAC 推理端严格对齐：
-        - 使用 'model_state_dict' 作为键，方便 serac_main.py 直接加载到底层 classifier 上。
-        """
+
         state_dict = {
             "model_state_dict": model.model.state_dict(),
             "model_name": "xlm-roberta-base",
@@ -677,9 +653,7 @@ class MemorylessClassifierTrainer:
         print(f"Model saved to {save_path}")
 
 
-# ========================================
-# 主函数
-# ========================================
+
 def main():
     print("加载数据...")
     with open("data/Bi-ZsRE-data/zsre_mend_train_10000.json", "r", encoding="utf-8") as f:

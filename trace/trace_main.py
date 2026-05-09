@@ -8,26 +8,21 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModel
 import torch.nn.functional as F
 
-# ================= 配置区域 =================
 
-# 1. Chinese LLaMA2 模型配置
 LLAMA_MODEL_PATH = 'model/chinese-llama2-7b-hf'
 
-# 2. MIKE 配置
-# Type 0: Identity, Type 1: Paraphrase, Type 3: Portability 
-# 遗传算法优化最佳配置 (200样本分层采样，得分: 84.630)
-# 比例: Type 0: 4个, Type 1: 6个, Type 3: 15个
+
 MIKE_ORDER = [3, 3, 3, 0, 3, 3, 3, 3, 1, 0, 1, 1, 1, 0, 3, 1, 3, 3, 3, 3, 3, 0, 1, 3, 3]
 NUM_SHOTS = 25
 SIMILARITY_MODEL_PATH = 'model/MiniLM-L6-v2'
 SIMILARITY_CLASSIFIER_PATH = 'model/6-11-C-1multilingual_similarity_classifier_purexlm_v6A.pth'
 SIMILARITY_THRESHOLD = 0.6
 
-# 3. 文件路径
+
 INPUT_FILE_PATH = "data/Bi-ZsRE-data/bizsre_test.json"
 RESULTS_DIR = "results"
 
-# 加载 Chinese LLaMA2 模型
+
 print(f" > 正在加载 Chinese LLaMA2 模型: {LLAMA_MODEL_PATH} ...")
 try:
     llama_tokenizer = AutoTokenizer.from_pretrained(
@@ -35,13 +30,12 @@ try:
         use_fast=False,
         trust_remote_code=True
     )
-    # 配置tokenizer以适配Chinese-LLaMA2（与B12配置一致）
+
     llama_tokenizer.truncation_side = "left"
     llama_tokenizer.padding_side = "left"
     
-    # 设置pad_token_id为eos_token_id（与B12配置一致，而非默认的unk_token）
-    # B12中所有LLaMA模型都使用: tokenizer.pad_token_id = tokenizer.eos_token_id
-    llama_tokenizer.pad_token_id = llama_tokenizer.eos_token_id  # pad_token_id = 2 (而非0)
+
+    llama_tokenizer.pad_token_id = llama_tokenizer.eos_token_id
     
     llama_model = AutoModelForCausalLM.from_pretrained(
         LLAMA_MODEL_PATH,
@@ -51,38 +45,26 @@ try:
     )
     llama_model.eval()
     
-    # 从模型config读取真实的max_position_embeddings（Chinese-LLaMA2是2048，不是4096）
+
     MAX_CONTEXT_LENGTH = getattr(llama_model.config, "max_position_embeddings", 2048)
     print(f" > Chinese LLaMA2 模型加载完成。使用上下文长度: {MAX_CONTEXT_LENGTH}")
 except Exception as e:
     print(f" [错误] 加载 Chinese LLaMA2 模型失败: {e}")
     exit()
 
-# 加载 Embedding 模型（用于few-shot检索）- 已改用XLM-RoBERTa相似度分类器
-# print(f" > 正在加载 Embedding 模型: {SIMILARITY_MODEL_PATH} ...")
-# try:
-#     embedding_tokenizer = AutoTokenizer.from_pretrained(SIMILARITY_MODEL_PATH)
-#     embedding_model = AutoModel.from_pretrained(SIMILARITY_MODEL_PATH)
-#     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
-#     embedding_model.to(device)
-#     print(" > Embedding 模型加载完成。")
-# except Exception as e:
-#     print(f" [错误] 加载 Embedding 模型失败: {e}")
-#     exit()
 
-# 设置设备（原本在embedding_model加载时设置）
+
 device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
-# 加载相似度分类器（用于记忆库检索）- 使用B12的SERAC实现
 print(f" > 正在加载相似度分类器: {SIMILARITY_CLASSIFIER_PATH} ...")
 try:
     from transformers import XLMRobertaTokenizer, XLMRobertaModel
-    # 使用本地xlm-roberta-base模型路径（与B12一致）
+
     XLM_MODEL_PATH = '../B12-fewshot-clear-all/model/xlm-roberta-base'
     classifier_tokenizer = XLMRobertaTokenizer.from_pretrained(XLM_MODEL_PATH)
     classifier_backbone = XLMRobertaModel.from_pretrained(XLM_MODEL_PATH)
     
-    # 加载微调后的XLM权重（与B12 SERAC一致）
+
     checkpoint = torch.load(SIMILARITY_CLASSIFIER_PATH, map_location='cpu')
     if 'model_state_dict' in checkpoint:
         classifier_backbone.load_state_dict(checkpoint['model_state_dict'])
@@ -100,7 +82,7 @@ except Exception as e:
     exit()
 
 def get_embedding(text_list):
-    """使用XLM-RoBERTa相似度分类器计算embedding（用于few-shot检索）"""
+
     encoded_input = classifier_tokenizer(text_list, padding=True, truncation=True, return_tensors='pt').to(device)
     with torch.no_grad():
         model_output = classifier_backbone(**encoded_input)
@@ -112,18 +94,18 @@ def get_embedding(text_list):
     return embeddings
 
 def get_similarity_score(question, memory_question):
-    """使用相似度分类器计算两个问题的相似度分数（参考B12 SERAC实现）"""
+
     try:
-        # 使用Mean Pooling计算embedding（与B12训练时一致）
+
         cls_ctx_input = classifier_tokenizer([memory_question], return_tensors="pt", padding=True).to(device)
         cls_main_input = classifier_tokenizer([question], return_tensors="pt", padding=True).to(device)
         
         with torch.no_grad():
-            # 获取模型输出
+
             ctx_outputs = classifier_backbone(**cls_ctx_input)
             main_outputs = classifier_backbone(**cls_main_input)
             
-            # Mean Pooling for ctx (memory)
+
             ctx_token_embeddings = ctx_outputs.last_hidden_state
             ctx_attention_mask = cls_ctx_input['attention_mask']
             ctx_input_mask_expanded = ctx_attention_mask.unsqueeze(-1).expand(ctx_token_embeddings.size()).float()
@@ -131,7 +113,7 @@ def get_similarity_score(question, memory_question):
             ctx_sum_mask = torch.clamp(ctx_input_mask_expanded.sum(1), min=1e-9)
             ctx_mean_embeddings = ctx_sum_embeddings / ctx_sum_mask
             
-            # Mean Pooling for main (query)
+
             main_token_embeddings = main_outputs.last_hidden_state
             main_attention_mask = cls_main_input['attention_mask']
             main_input_mask_expanded = main_attention_mask.unsqueeze(-1).expand(main_token_embeddings.size()).float()
@@ -139,15 +121,15 @@ def get_similarity_score(question, memory_question):
             main_sum_mask = torch.clamp(main_input_mask_expanded.sum(1), min=1e-9)
             main_mean_embeddings = main_sum_embeddings / main_sum_mask
             
-            # 计算余弦相似度（与B12训练时一致）
+
             cos_sim = (ctx_mean_embeddings * main_mean_embeddings).sum(-1) / (
                 ctx_mean_embeddings.norm(2, -1) * main_mean_embeddings.norm(2, -1)
             )
             
-            # Clamp到[-1, 1]范围
+
             cos_sim = torch.clamp(cos_sim, -1.0, 1.0)
             
-            # 归一化到[0, 1]范围（与B12训练时一致）
+
             normalized_sim = (cos_sim + 1) / 2
             normalized_sim = torch.clamp(normalized_sim, 0.0, 1.0)
             
@@ -158,12 +140,12 @@ def get_similarity_score(question, memory_question):
         return 0.0
 
 class MemoryBank:
-    """记忆库：存储编辑的QA对"""
+
     def __init__(self):
-        self.memories = []  # 存储 {'question': str, 'answer': str, 'lang': str}
+        self.memories = []
     
     def add_memory(self, question, answer, lang='en'):
-        """添加一个QA对到记忆库"""
+
         self.memories.append({
             'question': question,
             'answer': answer,
@@ -171,12 +153,7 @@ class MemoryBank:
         })
     
     def search_memory(self, query_question, threshold=0.6):
-        """在记忆库中搜索与查询问题相似的记忆
-        
-        Returns:
-            (similarity_score, memory_dict) 如果找到相似度>threshold的记忆
-            (0.0, None) 如果没有找到
-        """
+
         if not self.memories:
             return 0.0, None
         
@@ -195,15 +172,15 @@ class MemoryBank:
             return max_similarity, None
     
     def clear(self):
-        """清空记忆库"""
+
         self.memories = []
 
 def select_demonstrations_mixed(all_data, current_idx, current_query, k=32):
-    """选择few-shot demonstrations（与IKE相同）"""
+
     candidate_texts = []
     candidate_meta = [] 
     
-    # 1. 构建混合候选池
+
     for idx, item in enumerate(all_data):
         if idx == current_idx: continue 
         
@@ -218,10 +195,10 @@ def select_demonstrations_mixed(all_data, current_idx, current_query, k=32):
     if not candidate_texts:
         return []
 
-    # 2. 计算相似度
+
     query_embedding = get_embedding([current_query]) 
     
-    # 简单分批处理防止可能的 OOM
+
     batch_size = 512
     all_embeddings = []
     for i in range(0, len(candidate_texts), batch_size):
@@ -232,7 +209,7 @@ def select_demonstrations_mixed(all_data, current_idx, current_query, k=32):
         candidate_embeddings = torch.cat(all_embeddings, dim=0)
         cosine_scores = torch.mm(query_embedding, candidate_embeddings.transpose(0, 1))[0]
         
-        # 3. 直接取 Top-K
+
         k = min(k, len(candidate_texts))
         top_results = torch.topk(cosine_scores, k=k)
         top_indices = top_results.indices.tolist()
@@ -249,17 +226,8 @@ def select_demonstrations_mixed(all_data, current_idx, current_query, k=32):
     return []
 
 def construct_mike_prompt(demonstrations, memory_qa, current_item, edit_lang='en', test_lang='en', custom_test_question=None):
-    """构建MIKE prompt：few-shot + 记忆QA + 问题
-    
-    Args:
-        demonstrations: few-shot demonstrations
-        memory_qa: 记忆库中检索到的QA对 {'question': str, 'answer': str}
-        current_item: 当前测试项
-        edit_lang: 编辑语言
-        test_lang: 测试语言
-        custom_test_question: 自定义测试问题
-    """
-    # 1. 获取编辑语言的目标信息
+
+
     edit_data = current_item.get(edit_lang, {})
     edit_src = edit_data.get('src') 
     edit_alt = edit_data.get('alt')
@@ -270,8 +238,7 @@ def construct_mike_prompt(demonstrations, memory_qa, current_item, edit_lang='en
     random.shuffle(shuffled_order)
     
     demo_pointer = 0
-    
-    # 2. 构建few-shot demonstrations（去除Type 2: Locality）
+
     for type_code in shuffled_order:
         if demo_pointer >= len(demonstrations):
             continue
@@ -292,20 +259,20 @@ def construct_mike_prompt(demonstrations, memory_qa, current_item, edit_lang='en
         d_port_question = d_portability.get('New Question', '') if isinstance(d_portability, dict) else ''
         d_port_answer = d_portability.get('New Answer', '') if isinstance(d_portability, dict) else ''
         
-        # New Fact 始终使用该 demonstration 的 src + alt
+
         demo_new_fact = f"New Fact: Question: {d_src} Answer: {d_alt}"
         prompt_str = ""
         
-        if type_code == 0:  # Identity - src + alt
+        if type_code == 0:
             prompt_str = f"Prompt: Question: {d_src} Answer: {d_alt}"
             
-        elif type_code == 1:  # Paraphrase - rephrase + alt
+        elif type_code == 1:
             if d_rephrase:
                 prompt_str = f"Prompt: Question: {d_rephrase} Answer: {d_alt}"
             else:
                 prompt_str = f"Prompt: Question: {d_src} Answer: {d_alt}"
                 
-        elif type_code == 3:  # Portability - portability question + answer
+        elif type_code == 3:
             if d_port_question and d_port_answer:
                 prompt_str = f"Prompt: Question: {d_port_question} Answer: {d_port_answer}"
             else:
@@ -314,61 +281,61 @@ def construct_mike_prompt(demonstrations, memory_qa, current_item, edit_lang='en
         if prompt_str:
             context_parts.append(f"{demo_new_fact}\n{prompt_str}")
 
-    # 3. 添加记忆库中的QA对
+
     memory_fact_str = f"New Fact: Question: {memory_qa['question']} Answer: {memory_qa['answer']}"
     
-    # 4. 获取测试问题
+
     if custom_test_question:
         test_question = custom_test_question
     else:
         test_data = current_item.get(test_lang, {})
         test_question = test_data.get('src')
     
-    # 5. 组装完整prompt
+
     full_context = "\n\n".join(context_parts)
     final_instruction = f"{full_context}\n\n{memory_fact_str}\nPrompt: Question: {test_question} Answer:"
     
     return final_instruction
 
 def construct_simple_prompt(question):
-    """构建简单的问答prompt（相似度<0.6时使用）"""
+
     return f"Question: {question} Answer:"
 
 def query_model_with_target(prompt, target):
-    """使用Chinese-LLaMA2模型进行token by token推理"""
+
     try:
-        # 处理target，确保有前导空格
+
         target_text = target if (isinstance(target, str) and target[:1].isspace()) else f" {target}"
         
-        # 对target进行tokenize
+
         target_ids = llama_tokenizer(target_text, add_special_tokens=False, return_tensors='pt')["input_ids"].to(llama_model.device)
         
         if target_ids.size(1) == 0:
             return "", target
         
-        # 构建完整的输入（prompt + target）
+
         full_input = prompt + target_text
         encodings = llama_tokenizer(full_input, return_tensors='pt', truncation=True, max_length=MAX_CONTEXT_LENGTH)
         input_ids = encodings['input_ids'].to(llama_model.device)
         attention_mask = encodings['attention_mask'].to(llama_model.device)
         
-        # 一次性推理
+
         with torch.no_grad():
             outputs = llama_model(input_ids=input_ids, attention_mask=attention_mask)
             logits = outputs.logits
         
-        # 提取对应位置的预测tokens
+
         L = target_ids.size(1)
         ans = torch.argmax(logits, dim=-1)[:, -L-1:-1].squeeze()
         
-        # 解码预测的tokens
+
         ans_ids = ans.detach().cpu().numpy().tolist()
         if not isinstance(ans_ids, list):
             ans_ids = [ans_ids]
         
         predicted_answer = llama_tokenizer.decode(ans_ids, skip_special_tokens=True).strip()
         
-        # 清理常见的答案前缀（提高EM分数）
+
         prefixes_to_remove = [": ", ":", " ", "：", "： "]
         for prefix in prefixes_to_remove:
             if predicted_answer.startswith(prefix):
@@ -400,12 +367,10 @@ def main():
         data = json.load(f)
 
     test_data = data[:LIMIT] if LIMIT > 0 else data
-    
-    # 创建结果目录
+
     os.makedirs(RESULTS_DIR, exist_ok=True)
     os.makedirs('logs', exist_ok=True)
-    
-    # 输出文件路径
+
     output_filename = f"chinese_llama2_7b_mike_edit_{edit_lang}_test_results.json"
     output_path = os.path.join(RESULTS_DIR, output_filename)
     
@@ -416,8 +381,7 @@ def main():
     print(f"计划处理 {len(test_data)} 条数据")
     print(f"结果保存至: {output_path}")
     print(f"="*60)
-    
-    # 断点续传
+
     results = []
     start_index = 0
     
@@ -436,10 +400,8 @@ def main():
             print(" > [警告] 现有输出文件损坏或为空，将从头开始。")
             results = []
 
-    # 创建记忆库
     memory_bank = MemoryBank()
-    
-    # Token长度统计
+
     prompt_token_lengths = []
 
     for idx, item in tqdm(enumerate(test_data), total=len(test_data)):
@@ -447,13 +409,11 @@ def main():
             continue
         
         start_time = time.time()
-        
-        # 获取数据
+
         edit_data = item.get(edit_lang, {})
         en_data = item.get('en', {})
         zh_data = item.get('zh', {})
 
-        # 构建结果项基础结构
         result_item = {
             'pre': {},
             'post': {},
@@ -466,13 +426,10 @@ def main():
             }
         }
 
-        # ========== PRE-EDIT 推理（不使用记忆库）==========
-        # 1. Rewrite accuracy
         pre_prompt_rewrite = construct_simple_prompt(edit_data.get('src', ''))
         pre_ans_rewrite, pre_target_rewrite = query_model_with_target(pre_prompt_rewrite, edit_data.get('alt', ''))
         result_item['pre']['rewrite_acc'] = {'ans': pre_ans_rewrite, 'target': pre_target_rewrite}
-        
-        # 2. Rephrase accuracy
+
         if en_data.get('rephrase'):
             pre_prompt_rephrase_en = construct_simple_prompt(en_data.get('rephrase', ''))
             pre_ans_rephrase_en, pre_target_rephrase_en = query_model_with_target(pre_prompt_rephrase_en, en_data.get('alt', ''))
@@ -486,8 +443,7 @@ def main():
             result_item['pre']['rephrase_acc_zh'] = {'ans': pre_ans_rephrase_zh, 'target': pre_target_rephrase_zh}
         else:
             result_item['pre']['rephrase_acc_zh'] = {}
-        
-        # 3. Locality
+
         if en_data.get('loc') and en_data.get('loc_ans'):
             pre_prompt_loc_en = construct_simple_prompt(en_data.get('loc', ''))
             pre_ans_loc_en, pre_target_loc_en = query_model_with_target(pre_prompt_loc_en, en_data.get('loc_ans', ''))
@@ -501,8 +457,7 @@ def main():
             result_item['pre']['locality_zh'] = {'neighborhood_output_zh': {'ans': pre_ans_loc_zh, 'target': pre_target_loc_zh}}
         else:
             result_item['pre']['locality_zh'] = {'neighborhood_output_zh': {}}
-        
-        # 4. Portability
+
         en_portability = en_data.get('portability', {})
         if isinstance(en_portability, dict) and en_portability.get('New Question') and en_portability.get('New Answer'):
             pre_prompt_port_en = construct_simple_prompt(en_portability.get('New Question', ''))
@@ -519,35 +474,31 @@ def main():
         else:
             result_item['pre']['portability_zh'] = {'one_hop_acc_en': {}}
 
-        # ========== POST-EDIT 推理（使用MIKE方法）==========
-        # 清空记忆库（每次编辑后都清空，只影响当前7个问题）
         memory_bank.clear()
-        
-        # 将当前编辑的QA对添加到记忆库
+
         memory_bank.add_memory(
             question=edit_data.get('src', ''),
             answer=edit_data.get('alt', ''),
             lang=edit_lang
         )
-        
-        # 1. Rewrite accuracy - 检索记忆库
+
         similarity, memory = memory_bank.search_memory(edit_data.get('src', ''), threshold=SIMILARITY_THRESHOLD)
         
         if memory is not None:
-            # 相似度 >= 0.6，使用MIKE prompt
+
             demos_rewrite = select_demonstrations_mixed(data, idx, edit_data.get('src', ''), k=NUM_SHOTS)
             post_prompt_rewrite = construct_mike_prompt(demos_rewrite, memory, item, edit_lang=edit_lang, test_lang=edit_lang)
-            # 记录prompt长度
+
             prompt_tokens = len(llama_tokenizer(post_prompt_rewrite, add_special_tokens=True)["input_ids"])
             prompt_token_lengths.append(prompt_tokens)
         else:
-            # 相似度 < 0.6，直接问
+
             post_prompt_rewrite = construct_simple_prompt(edit_data.get('src', ''))
         
         post_ans_rewrite, post_target_rewrite = query_model_with_target(post_prompt_rewrite, edit_data.get('alt', ''))
         result_item['post']['rewrite_acc'] = {'ans': post_ans_rewrite, 'target': post_target_rewrite}
         
-        # 2. Rephrase accuracy
+
         if en_data.get('rephrase'):
             similarity, memory = memory_bank.search_memory(en_data.get('rephrase', ''), threshold=SIMILARITY_THRESHOLD)
             if memory is not None:
@@ -576,7 +527,7 @@ def main():
         else:
             result_item['post']['rephrase_acc_zh'] = {}
         
-        # 3. Locality
+
         if en_data.get('loc') and en_data.get('loc_ans'):
             similarity, memory = memory_bank.search_memory(en_data.get('loc', ''), threshold=SIMILARITY_THRESHOLD)
             if memory is not None:
@@ -605,7 +556,7 @@ def main():
         else:
             result_item['post']['locality_zh'] = {'neighborhood_output_zh': {}}
         
-        # 4. Portability
+
         if isinstance(en_portability, dict) and en_portability.get('New Question') and en_portability.get('New Answer'):
             similarity, memory = memory_bank.search_memory(en_portability.get('New Question', ''), threshold=SIMILARITY_THRESHOLD)
             if memory is not None:
@@ -635,19 +586,19 @@ def main():
             result_item['post']['portability_zh'] = {'one_hop_acc_en': {}}
 
         results.append(result_item)
-        
-        # 每10条保存一次
+
+
         if (idx + 1) % 10 == 0:
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(results, f, ensure_ascii=False, indent=4)
         
         print(f"处理第 {idx + 1} 条数据，耗时 {time.time() - start_time:.2f} 秒")
     
-    # 最终保存
+
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(results, f, ensure_ascii=False, indent=4)
     
-    # 输出token长度统计
+
     if prompt_token_lengths:
         import numpy as np
         lengths = np.array(prompt_token_lengths)
