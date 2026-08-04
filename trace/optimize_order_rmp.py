@@ -702,7 +702,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name', type=str, required=True, choices=['baichuan', 'chinese_llama2'],
                         help='模型名称')
-    parser.add_argument('--val_set', type=str, default='data/Bi-ZsRE-data/bizsre_test.json',
+    parser.add_argument('--val_set', type=str, default='data/Bi-ZsRE-data/rmp/val_set.json',
                         help='验证集路径')
     parser.add_argument('--max_iter', type=int, default=20,
                         help='最大迭代次数')
